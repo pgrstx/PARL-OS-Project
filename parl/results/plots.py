@@ -217,7 +217,7 @@ def figure5_adaptation_latency(rolling_npz: str, labels_file: str,
     fig, ax = plt.subplots(figsize=(10, 6))
     valid_policies = [p for p in policies_to_compare if latency_data[p]]
     bp = ax.boxplot([latency_data[p] for p in valid_policies],
-                    labels=valid_policies, patch_artist=True, notch=False)
+                    tick_labels=valid_policies, patch_artist=True, notch=False)
 
     for patch, policy in zip(bp["boxes"], valid_policies):
         patch.set_facecolor(POLICY_COLORS.get(policy, "#999"))

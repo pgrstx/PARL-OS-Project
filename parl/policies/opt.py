@@ -28,24 +28,25 @@ class OPTPolicy(Policy):
 
     def prescan(self, trace: list[int]):
         """
-        Pre-scan the trace to build the next_use table.
-        Call this ONCE before running the simulation.
+        Pre-scan the trace to build per-page next_occurrence lists.
 
-        next_use[i] = index of next access to trace[i] after position i.
-        If page is never accessed again, next_use[i] = infinity (len(trace)).
+        For each page, build a sorted list of all indices where it appears.
+        Then during eviction, binary search to find the next occurrence after
+        the current position — O(log n) instead of O(n) per query.
         """
+        import bisect
         self._trace = trace
         n = len(trace)
-        self._next_use = [n] * n          # default: never used again = n (infinity)
 
-        # Build next_use by scanning backwards
-        last_seen: dict[int, int] = {}
-        for i in range(n - 1, -1, -1):
-            page = trace[i]
-            if page in last_seen:
-                self._next_use[i] = last_seen[page]
-            last_seen[page] = i
-
+        # Build: page_id → sorted list of occurrence indices
+        occurrences: dict[int, list[int]] = {}
+        for i, page in enumerate(trace):
+            if page not in occurrences:
+                occurrences[page] = []
+            occurrences[page].append(i)
+        self._occurrences = occurrences
+        self._n = n
+        self._bisect = bisect
         self._current_idx = 0
 
     def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
@@ -55,23 +56,16 @@ class OPTPolicy(Policy):
         if is_hit:
             return None
 
-        # Miss — need to insert page_id
         if not cache_full:
             self._in_cache.add(page_id)
             return None
 
-        # Evict the page whose next use is furthest in the future
-        # We need next_use for each page currently in cache
-        # Build a quick lookup: for pages in cache, find their next access from idx
+        # Evict the page whose next use is furthest (or never) in the future
         evict_candidate = None
         max_next_use = -1
 
         for p in self._in_cache:
-            # Find the next use of p from current position idx onward
-            # We use the precomputed next_use of the most recent occurrence
-            # Efficient: scan forward from idx for each page (approximation)
-            # For correctness, we track the current position's next_use mapping
-            nu = self._get_next_use(p, idx)
+            nu = self._next_occurrence(p, idx + 1)
             if nu > max_next_use:
                 max_next_use = nu
                 evict_candidate = p
@@ -81,13 +75,15 @@ class OPTPolicy(Policy):
         self._in_cache.add(page_id)
         return evict_candidate
 
-    def _get_next_use(self, page_id: int, from_idx: int) -> int:
-        """Find next use of page_id starting from from_idx."""
-        n = len(self._trace)
-        for i in range(from_idx, n):
-            if self._trace[i] == page_id:
-                return i
-        return n  # never used again
+    def _next_occurrence(self, page_id: int, from_idx: int) -> int:
+        """Binary search for next occurrence of page_id at or after from_idx."""
+        occ = self._occurrences.get(page_id)
+        if occ is None:
+            return self._n   # never accessed again
+        pos = self._bisect.bisect_left(occ, from_idx)
+        if pos < len(occ):
+            return occ[pos]
+        return self._n  # never accessed again
 
     def reset(self):
         self._current_idx = 0

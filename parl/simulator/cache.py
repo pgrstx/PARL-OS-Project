@@ -45,12 +45,13 @@ class Cache:
         """
         Switch to a new replacement policy mid-run.
         The new policy's internal state starts fresh, but the cache contents remain.
-        The new policy must be pre-populated with the current pages.
+        We populate the new policy by replaying current pages as cold inserts
+        (is_hit=False, cache_full=False) so each policy builds its internal state.
         """
         self._policy = new_policy
-        # Re-inject current pages into new policy (as hits to build its state)
+        # Re-inject current pages as cold insertions (new policy has no state yet)
         for page in list(self._pages):
-            new_policy.on_access(page, is_hit=True, cache_full=False)
+            new_policy.on_access(page, is_hit=False, cache_full=False)
 
     def access(self, page_id: int) -> bool:
         """
