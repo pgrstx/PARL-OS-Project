@@ -63,6 +63,15 @@ simulation_state = {
     "last_added":    [],
     "last_evicted":  [],
     "running":       True,
+    # Remote machine data (populated by /ubuntu_events POST)
+    "remote": {
+        "connected":   False,
+        "last_seen":   0,
+        "system":      {},
+        "processes":   [],
+        "evictions":   deque(maxlen=20),
+        "label":       "Remote",
+    },
 }
 state_lock = threading.Lock()
 
@@ -193,10 +202,24 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                 "page_id": p,
                 "process": info.get("process", "?"),
                 "region":  info.get("region",  "?"),
-                "score":   round(score, 3),
+                "score":   score,
                 "age":     step - info.get("added_step", step),
             })
         slots.sort(key=lambda s: s["score"])   # lowest score first (eviction candidates)
+
+        # Normalize scores to [0,1] relative to current cache contents so
+        # the dashboard always shows meaningful colour spread even when the
+        # trained network outputs very small absolute values for all pages.
+        if slots:
+            raw_min = slots[0]["score"]
+            raw_max = slots[-1]["score"]
+            rng = raw_max - raw_min
+            for s in slots:
+                if rng > 1e-6:
+                    s["score_norm"] = round((s["score"] - raw_min) / rng, 3)
+                else:
+                    s["score_norm"] = 0.5
+                s["score"] = round(s["score"], 5)  # keep raw for tooltip
 
         # System stats
         sys_stats = monitor.system_stats or {}
@@ -238,6 +261,11 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
         # Push snapshot to SSE queue (non-blocking)
         try:
             with state_lock:
+                remote = simulation_state["remote"]
+                # Mark remote as disconnected if no POST in last 10 seconds
+                if remote["connected"] and time.time() - remote["last_seen"] > 10:
+                    remote["connected"] = False
+
                 snapshot = {
                     "step":        simulation_state["step"],
                     "cache_slots": simulation_state["cache_slots"],
@@ -250,6 +278,13 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                     "eviction_log": list(simulation_state["eviction_log"])[:15],
                     "last_added":  simulation_state["last_added"],
                     "last_evicted": simulation_state["last_evicted"],
+                    "remote": {
+                        "connected": remote["connected"],
+                        "label":     remote["label"],
+                        "system":    remote["system"],
+                        "processes": remote["processes"],
+                        "evictions": list(remote["evictions"])[:10],
+                    },
                 }
             event_queue.put_nowait(json.dumps(snapshot))
         except queue.Full:
@@ -302,6 +337,7 @@ def stream():
 def get_state():
     """REST endpoint for initial page load."""
     with state_lock:
+        remote = simulation_state["remote"]
         return jsonify({
             "step":        simulation_state["step"],
             "cache_slots": simulation_state["cache_slots"],
@@ -312,25 +348,32 @@ def get_state():
             "system":      simulation_state["system"],
             "processes":   simulation_state["processes"],
             "eviction_log": list(simulation_state["eviction_log"])[:15],
+            "remote": {
+                "connected": remote["connected"],
+                "label":     remote["label"],
+                "system":    remote["system"],
+                "processes": remote["processes"],
+                "evictions": list(remote["evictions"])[:10],
+            },
         })
 
 
 @app.route("/ubuntu_events", methods=["POST"])
 def ubuntu_events():
     """
-    Receive page-access events from the Ubuntu VM agent (ubuntu_agent.py).
+    Receive page-access events + process stats from a remote machine agent.
 
     Expected JSON body:
     {
-        "events": [
-            {"page_id": 12345, "process": "firefox", "region": "heap:0"},
-            ...
-        ],
-        "system": {
-            "total_gb": 8.0, "used_gb": 4.2, "used_pct": 52.5,
-            "swap_gb": 0.1, "pages_active": 80000,
-            "pageins": 100, "pageouts": 5
-        }
+        "label":   "Ubuntu VM",          # optional display name
+        "events":  [{"page_id": 12345, "process": "firefox", "region": "heap:0"}, ...],
+        "system":  {"total_gb": 8.0, "used_gb": 4.2, "used_pct": 52.5,
+                    "swap_gb": 0.1, "pages_active": 80000,
+                    "pageins": 100, "pageouts": 5},
+        "processes": [{"pid": 1234, "name": "firefox", "rss": 412.3, "pct": 5.1}, ...],
+        "evictions": [{"page_id": 8888, "process": "firefox", "region": "heap:0",
+                       "score": 0.12, "phase": "Sequential Scan",
+                       "reason": "Cold page flushed by kernel"}]
     }
     """
     from flask import request
@@ -338,35 +381,35 @@ def ubuntu_events():
     if not data:
         return jsonify({"error": "invalid JSON"}), 400
 
-    events = data.get("events", [])
-    sys_override = data.get("system", {})
+    events    = data.get("events", [])
+    sys_info  = data.get("system", {})
+    procs     = data.get("processes", [])
+    evictions = data.get("evictions", [])
+    label     = data.get("label", "Remote")[:24]
 
-    if events:
-        # Inject Ubuntu events into the event queue as a special snapshot marker
-        # so the background SSE stream picks them up.
-        try:
-            with state_lock:
-                # Merge system stats if provided by Ubuntu agent
-                if sys_override:
-                    simulation_state["system"].update({
-                        k: v for k, v in sys_override.items()
-                        if k in ("total_gb", "used_gb", "used_pct",
-                                 "swap_gb", "pages_active", "pageins", "pageouts")
-                    })
-                # Append to eviction log if the payload includes evictions
-                for ev in data.get("evictions", []):
-                    log_entry = {
-                        "step":    simulation_state["step"],
-                        "page":    ev.get("page_id", 0),
-                        "process": ev.get("process", "ubuntu")[:18],
-                        "region":  ev.get("region", "?")[:28],
-                        "score":   round(ev.get("score", 0), 4),
-                        "phase":   ev.get("phase", "?"),
-                        "reason":  ev.get("reason", "Ubuntu kernel eviction"),
-                    }
-                    simulation_state["eviction_log"].appendleft(log_entry)
-        except Exception:
-            pass
+    with state_lock:
+        remote = simulation_state["remote"]
+        remote["connected"] = True
+        remote["last_seen"] = time.time()
+        remote["label"]     = label
+        if sys_info:
+            remote["system"] = {
+                k: v for k, v in sys_info.items()
+                if k in ("total_gb", "used_gb", "used_pct",
+                         "swap_gb", "pages_active", "pageins", "pageouts")
+            }
+        if procs:
+            remote["processes"] = procs[:8]
+        for ev in evictions:
+            remote["evictions"].appendleft({
+                "step":    simulation_state["step"],
+                "page":    ev.get("page_id", 0),
+                "process": ev.get("process", "remote")[:18],
+                "region":  ev.get("region", "?")[:28],
+                "score":   round(ev.get("score", 0), 4),
+                "phase":   ev.get("phase", "?"),
+                "reason":  ev.get("reason", "Remote eviction"),
+            })
 
     return jsonify({"ok": True, "received": len(events)})
 

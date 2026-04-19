@@ -374,6 +374,38 @@
   .feat-bar-bg { flex: 1; height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
   .feat-bar-fill { height: 100%; background: var(--blue); border-radius: 3px; transition: width 0.6s; }
 
+  /* Remote machine panel */
+  .remote-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .remote-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+    transition: background 0.5s;
+  }
+  .remote-dot.live {
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  .remote-offline {
+    color: var(--muted);
+    font-size: 11px;
+    font-style: italic;
+  }
+  .remote-sys {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 6px;
+    font-size: 11px;
+  }
+  .remote-sys span { color: var(--muted); }
+  .remote-sys b    { color: var(--text); font-family: monospace; }
+
   /* Tooltip */
   #tooltip {
     position: fixed;
@@ -478,6 +510,18 @@
     <div class="panel">
       <div class="section-title">Top Processes by RSS</div>
       <div id="proc-list"></div>
+    </div>
+
+    <!-- Remote machine -->
+    <div class="panel" id="remote-panel">
+      <div class="remote-header">
+        <div class="remote-dot" id="remote-dot"></div>
+        <div class="section-title" style="margin-bottom:0" id="remote-title">Remote Machine</div>
+      </div>
+      <div id="remote-body" class="remote-offline">
+        Waiting for agent — run on remote machine:<br>
+        <code style="font-size:10px;color:var(--blue)">python3 realtime/ubuntu_agent.py --server http://&lt;this-mac-ip&gt;:5050</code>
+      </div>
     </div>
 
     <!-- Eviction log -->
@@ -641,7 +685,10 @@ function renderUpdate(data) {
   slots.forEach((slot, idx) => {
     if (idx >= slotEls.length) return;
     const el = slotEls[idx];
-    const colors = scoreToColor(slot.score);
+    // Use normalised score [0,1] relative to current cache for colour (always shows spread)
+    // Raw score is kept for tooltip so you can see the true network value
+    const normScore = (slot.score_norm !== undefined) ? slot.score_norm : slot.score;
+    const colors = scoreToColor(normScore);
 
     el.className = 'cache-slot';
     if (addedSet.has(slot.page_id))  el.classList.add('just-added');
@@ -653,21 +700,22 @@ function renderUpdate(data) {
     const proc  = el.querySelector('.slot-process');
     const reg   = el.querySelector('.slot-region');
     const bar   = el.querySelector('.slot-score-bar');
-    const score = el.querySelector('.score-label');
+    const scoreEl = el.querySelector('.score-label');
 
     proc.style.color = '#e6edf3';
     proc.textContent = slot.process;
     reg.textContent  = slot.region.replace(slot.process + ':', '');
-    bar.style.width  = (slot.score * 100) + '%';
+    bar.style.width  = (normScore * 100) + '%';
     bar.style.background = colors.bar;
-    score.textContent = scoreToText(slot.score);
+    scoreEl.textContent = scoreToText(normScore);
 
-    // Tooltip data
-    el.dataset.pageId  = slot.page_id;
-    el.dataset.process = slot.process;
-    el.dataset.region  = slot.region;
-    el.dataset.score   = slot.score;
-    el.dataset.age     = slot.age;
+    // Tooltip data (raw score for honest display)
+    el.dataset.pageId   = slot.page_id;
+    el.dataset.process  = slot.process;
+    el.dataset.region   = slot.region;
+    el.dataset.score    = slot.score;     // raw network output
+    el.dataset.scoreNorm = normScore;     // normalised for colour
+    el.dataset.age      = slot.age;
   });
 
   // Empty remaining slots
@@ -726,6 +774,13 @@ function renderUpdate(data) {
   if (log.innerHTML !== newHtml) {
     log.innerHTML = newHtml;
   }
+
+  // ── Remote machine panel
+  renderRemote(data.remote);
+
+  // ── Tab title: show DQN miss rate so you can monitor without switching tabs
+  const dqnMiss = lastOf(mrs.DQN);
+  document.title = `PARL [DQN ${dqnMiss} | LRU ${lastOf(mrs.LRU)}] — Step ${fmtNum(data.step)}`;
 }
 
 function scoreColor(score) {
@@ -733,6 +788,60 @@ function scoreColor(score) {
   if (score < 0.4)  return '#ffa657';
   if (score < 0.55) return '#d29922';
   return '#3fb950';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remote machine panel
+// ─────────────────────────────────────────────────────────────────────────────
+function renderRemote(remote) {
+  if (!remote) return;
+  const dot   = document.getElementById('remote-dot');
+  const title = document.getElementById('remote-title');
+  const body  = document.getElementById('remote-body');
+
+  if (!remote.connected) {
+    dot.classList.remove('live');
+    title.textContent = remote.label || 'Remote Machine';
+    body.innerHTML = `<div class="remote-offline">Waiting for agent —<br>
+      <code style="font-size:10px;color:var(--blue)">python3 realtime/ubuntu_agent.py --server http://&lt;this-mac-ip&gt;:5050</code></div>`;
+    return;
+  }
+
+  dot.classList.add('live');
+  title.textContent = remote.label || 'Remote Machine';
+
+  const sys = remote.system || {};
+  const procs = (remote.processes || []).slice(0, 5);
+  const evictions = (remote.evictions || []).slice(0, 4);
+
+  const ramPct = sys.used_pct || 0;
+  const ramColor = ramPct > 85 ? 'var(--red)' : ramPct > 70 ? 'var(--yellow)' : 'var(--green)';
+
+  body.innerHTML = `
+    <div class="remote-sys">
+      <span>RAM <b>${sys.used_gb||'-'}/${sys.total_gb||'-'} GB</b></span>
+      <span>Swap <b>${sys.swap_gb||0} GB</b></span>
+      <span style="color:${ramColor}"><b>${ramPct}%</b></span>
+    </div>
+    <div style="height:4px;background:var(--bg3);border-radius:2px;margin-bottom:8px;overflow:hidden">
+      <div style="height:100%;width:${ramPct}%;background:${ramColor};border-radius:2px;transition:width 1s"></div>
+    </div>
+    ${procs.length ? `
+    <div style="font-size:10px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Top Processes</div>
+    ${procs.map(p => `
+      <div class="proc-row" style="font-size:10px">
+        <div class="proc-name">${p.name}</div>
+        <div class="proc-rss" style="font-size:10px">${p.rss} MB</div>
+        <div class="proc-pct" style="font-size:10px">${(p.pct||0).toFixed(1)}%</div>
+      </div>`).join('')}` : ''}
+    ${evictions.length ? `
+    <div style="font-size:10px;color:var(--muted);margin-top:6px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Recent Evictions</div>
+    ${evictions.map(e => `
+      <div style="font-size:10px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+        <span style="color:var(--red)">✗ ${e.process}</span>
+        <span style="color:var(--muted);float:right">${e.reason||''}</span>
+      </div>`).join('')}` : ''}
+  `;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -749,14 +858,16 @@ grid.addEventListener('mousemove', e => {
   tooltip.style.display = 'block';
   tooltip.style.left = (e.clientX + 14) + 'px';
   tooltip.style.top  = (e.clientY - 10) + 'px';
+  const normScore = parseFloat(slot.dataset.scoreNorm || score);
   tooltip.innerHTML = `
     <div class="tt-title">Page ${slot.dataset.pageId}</div>
     <div class="tt-row"><span class="tt-label">Process</span><span class="tt-val">${slot.dataset.process}</span></div>
     <div class="tt-row"><span class="tt-label">Region</span><span class="tt-val">${(slot.dataset.region||'').split(':').slice(-1)[0]}</span></div>
-    <div class="tt-row"><span class="tt-label">Keep score</span><span class="tt-val" style="color:${scoreColor(score)}">${score.toFixed(4)}</span></div>
+    <div class="tt-row"><span class="tt-label">Raw NN score</span><span class="tt-val" style="color:var(--muted)">${score.toFixed(5)}</span></div>
+    <div class="tt-row"><span class="tt-label">Relative rank</span><span class="tt-val" style="color:${scoreColor(normScore)}">${(normScore*100).toFixed(0)}th pct</span></div>
     <div class="tt-row"><span class="tt-label">Age (steps)</span><span class="tt-val">${slot.dataset.age}</span></div>
     <div style="margin-top:6px;font-size:10px;color:var(--muted)">
-      ${score < 0.3 ? '⚠ LOW SCORE — eviction candidate' : score > 0.7 ? '✅ HIGH SCORE — safely kept' : '→ Moderate score'}
+      ${normScore < 0.3 ? '⚠ COLD — eviction candidate' : normScore > 0.7 ? '✅ HOT — safely kept' : '→ Moderate warmth'}
     </div>
   `;
 });
