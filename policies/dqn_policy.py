@@ -234,6 +234,7 @@ class DQNEvictionPolicy(Policy):
             "evicted_page":  evict,
             "evict_score":   evict_score,
             "step":          self._step,
+            "all_scores":    scores,   # full {page_id: score} dict used by server.py
             "scores_sample": dict(sorted(scores.items(), key=lambda x: x[1])[:5]),
             "top_kept":      sorted(scores, key=scores.get, reverse=True)[:3],
         }
@@ -252,6 +253,12 @@ class DQNEvictionPolicy(Policy):
         """
         Compute keep-scores for all pages.
         Returns (scores_dict, features_dict).
+
+        Before the network has trained (< TRAIN_INTERVAL evictions), we blend
+        the raw network output with a hand-crafted heuristic score so the
+        dashboard shows meaningful spread right away instead of flat 0.5.
+        Heuristic: keep-score = 0.4*recency + 0.4*frequency + 0.2*ird_score
+        (features f0, f1, f3 from the feature vector).
         """
         max_freq = max(
             (self._page_stats[p].access_count for p in pages if p in self._page_stats),
@@ -266,7 +273,19 @@ class DQNEvictionPolicy(Policy):
         with torch.no_grad():
             raw_scores = self._net(X).cpu().numpy()
 
-        scores = {p: float(raw_scores[i]) for i, p in enumerate(pages)}
+        # Blend with heuristic until training has warmed up
+        trained_enough = self._eviction_count >= self.TRAIN_INTERVAL * 2
+        blend = min(1.0, self._eviction_count / max(self.TRAIN_INTERVAL * 2, 1))
+
+        scores = {}
+        for i, p in enumerate(pages):
+            nn_score = float(raw_scores[i])
+            f = feature_list[i]
+            # heuristic keep-score from recency, frequency, ird
+            heuristic = float(0.4 * f[0] + 0.4 * f[1] + 0.2 * f[3])
+            # linearly blend from heuristic → network as training progresses
+            scores[p] = blend * nn_score + (1.0 - blend) * heuristic
+
         features_map = {p: feature_list[i] for i, p in enumerate(pages)}
         return scores, features_map
 
