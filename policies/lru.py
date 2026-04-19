@@ -21,7 +21,7 @@ class LRUPolicy(Policy):
     def __init__(self):
         self._cache: OrderedDict[int, None] = OrderedDict()
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         if is_hit:
             self._cache.move_to_end(page_id)
             return None

@@ -3,11 +3,12 @@ run_experiment.py — main CLI entry point for the PARL project.
 
 Usage:
   python run_experiment.py --mode generate_traces
-  python run_experiment.py --mode train  --trace traces/synthetic/mixed_phase.trace
-  python run_experiment.py --mode eval   --trace traces/synthetic/mixed_phase.trace
+  python run_experiment.py --mode train  [--train_mode dqn_direct|policy_select]
+  python run_experiment.py --mode eval
   python run_experiment.py --mode compare
   python run_experiment.py --mode plots
-  python run_experiment.py --mode all    (generate → train → eval → plots)
+  python run_experiment.py --mode monitor    ← LIVE macOS/Linux dashboard
+  python run_experiment.py --mode all        (generate → train → eval → plots)
 """
 
 import os
@@ -29,7 +30,8 @@ def mode_generate_traces():
 
 def mode_train(args):
     print("=" * 60)
-    print("STEP 2: Training PARL DQN agent")
+    train_mode = getattr(args, "train_mode", "dqn_direct")
+    print(f"STEP 2: Training PARL — mode={train_mode}")
     print("=" * 60)
     from train_agent import train
     train(
@@ -38,6 +40,7 @@ def mode_train(args):
         max_steps=args.max_steps,
         output_dir=args.output_dir,
         model_dir=args.model_dir,
+        mode=train_mode,
     )
 
 
@@ -119,20 +122,24 @@ Examples:
     )
     parser.add_argument("--mode", required=True,
                         choices=["generate_traces", "train", "eval",
-                                 "compare", "plots", "all"])
+                                 "compare", "plots", "monitor", "all"])
     parser.add_argument("--trace", default="traces/synthetic/mixed_phase.trace",
                         help="Path to .trace file")
+    parser.add_argument("--train_mode", default="dqn_direct",
+                        choices=["dqn_direct", "policy_select"],
+                        help="Training mode: dqn_direct (per-page NN) or policy_select (choose strategy)")
     parser.add_argument("--cache_size", type=int, default=256)
     parser.add_argument("--cache_sizes", nargs="+", type=int,
                         default=[64, 128, 256, 512])
     parser.add_argument("--max_steps", type=int, default=500_000)
-    parser.add_argument("--model_path", default="models/dqn_parl.pt")
+    parser.add_argument("--model_path", default="models/dqn_direct.pt")
     parser.add_argument("--model_dir", default="models")
     parser.add_argument("--output_dir", default="results")
+    parser.add_argument("--monitor_interval", type=float, default=1.0,
+                        help="Real-time monitor sampling interval (seconds)")
 
     args = parser.parse_args()
 
-    # Ensure we run from the parl/ directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
 
@@ -146,12 +153,26 @@ Examples:
         mode_compare(args)
     elif args.mode == "plots":
         mode_plots(args)
+    elif args.mode == "monitor":
+        print("=" * 60)
+        print("PARL Real-Time OS Memory Monitor")
+        print("=" * 60)
+        from realtime.dashboard import LiveDashboard
+        dash = LiveDashboard(
+            sample_interval=args.monitor_interval,
+            model_path=args.model_path,
+        )
+        dash.CACHE_SIZE = args.cache_size
+        try:
+            dash.run()
+        except KeyboardInterrupt:
+            pass
     elif args.mode == "all":
         mode_generate_traces()
         mode_train(args)
         mode_eval(args)
         mode_plots(args)
-        print("\n✓ All done! Check results/ for figures and evaluation_results.csv")
+        print("\nAll done! Check results/ for figures and evaluation_results.csv")
 
 
 if __name__ == "__main__":

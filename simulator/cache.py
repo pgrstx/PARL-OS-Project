@@ -61,7 +61,8 @@ class Cache:
         is_hit = page_id in self._pages
         cache_full = len(self._pages) >= self._capacity
 
-        evict = self._policy.on_access(page_id, is_hit, cache_full)
+        evict = self._policy.on_access(page_id, is_hit, cache_full,
+                                        current_pages=frozenset(self._pages))
 
         if not is_hit:
             self._misses += 1

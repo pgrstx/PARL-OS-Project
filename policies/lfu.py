@@ -25,7 +25,7 @@ class LFUPolicy(Policy):
             defaultdict(OrderedDict)                                  # freq → {page_id: None}
         self._min_freq: int = 0
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         if is_hit:
             self._increment_freq(page_id)
             return None

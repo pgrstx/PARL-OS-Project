@@ -27,7 +27,7 @@ class HybridPolicy(Policy):
         # LFU component
         self._freq: dict[int, int] = {}
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         if is_hit:
             self._lru_order.move_to_end(page_id)
             self._freq[page_id] = self._freq.get(page_id, 0) + 1

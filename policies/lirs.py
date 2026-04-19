@@ -40,7 +40,7 @@ class LIRSPolicy(Policy):
         self._lir_limit = max(1, int(capacity * 0.99))
         self._hir_limit = max(1, capacity - self._lir_limit)
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         evict = None
 
         if page_id in self._lir_set:

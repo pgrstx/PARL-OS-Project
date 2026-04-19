@@ -21,7 +21,7 @@ class CLOCKPolicy(Policy):
         self._page_to_slot: dict[int, int] = {}  # page_id → slot index
         self._hand: int = 0                # clock hand position
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         if is_hit:
             slot = self._page_to_slot[page_id]
             self._ref_bits[slot] = 1

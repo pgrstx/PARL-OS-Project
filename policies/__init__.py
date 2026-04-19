@@ -5,6 +5,7 @@ from .arc import ARCPolicy
 from .lirs import LIRSPolicy
 from .opt import OPTPolicy
 from .hybrid import HybridPolicy
+from .dqn_policy import DQNEvictionPolicy
 
 # Action ID → Policy class mapping (used by DQN agent)
 POLICY_CLASSES = {
@@ -25,6 +26,6 @@ POLICY_NAMES = {
 
 __all__ = [
     "LRUPolicy", "CLOCKPolicy", "LFUPolicy", "ARCPolicy",
-    "LIRSPolicy", "OPTPolicy", "HybridPolicy",
+    "LIRSPolicy", "OPTPolicy", "HybridPolicy", "DQNEvictionPolicy",
     "POLICY_CLASSES", "POLICY_NAMES",
 ]

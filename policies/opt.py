@@ -49,7 +49,7 @@ class OPTPolicy(Policy):
         self._bisect = bisect
         self._current_idx = 0
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         idx = self._current_idx
         self._current_idx += 1
 

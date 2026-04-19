@@ -18,14 +18,18 @@ class Policy(ABC):
     """Base class for all page replacement policies."""
 
     @abstractmethod
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool,
+                  current_pages: "frozenset | None" = None) -> Optional[int]:
         """
         Called on every page access.
 
         Args:
-            page_id:    The page being accessed.
-            is_hit:     True if page is already in cache.
-            cache_full: True if cache is at capacity (eviction needed on miss).
+            page_id:       The page being accessed.
+            is_hit:        True if page is already in cache.
+            cache_full:    True if cache is at capacity (eviction needed on miss).
+            current_pages: frozenset of page_ids currently in cache.
+                           Passed so that DQN-style policies can score all
+                           candidates and pick the worst one to evict.
 
         Returns:
             page_id to evict if (not is_hit and cache_full), else None.

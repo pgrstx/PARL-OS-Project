@@ -34,7 +34,7 @@ class ARCPolicy(Policy):
     def set_capacity(self, capacity: int):
         self._capacity = capacity
 
-    def on_access(self, page_id: int, is_hit: bool, cache_full: bool) -> Optional[int]:
+    def on_access(self, page_id: int, is_hit: bool, cache_full: bool, current_pages=None) -> Optional[int]:
         evict = None
 
         # Case 1: page is in T1 (recently seen once) → promote to T2
