@@ -20,6 +20,7 @@ import os
 import sys
 import json
 import time
+import random
 import threading
 import queue
 from collections import deque
@@ -84,10 +85,16 @@ event_queue: queue.Queue = queue.Queue(maxsize=10)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def simulation_thread(model_path: str, cache_size: int, interval: float):
+    # Scale working set to ~2x cache size so there are always evictions but
+    # not so many that all policies thrash at 100% miss rate.
+    # Each process gets up to 8 regions → top_n * 8 ≈ working_set_size.
+    top_n = max(8, cache_size // 4)         # cache=48→12 procs, cache=256→64 procs
+    max_ev = cache_size * 2                  # events per sample ≈ 2× cache size
+
     monitor = OSMemoryMonitor(
         sample_interval=interval,
-        top_n_processes=30,
-        max_events_per_sample=cache_size * 3,
+        top_n_processes=top_n,
+        max_events_per_sample=max_ev,
     )
 
     dqn_policy = DQNEvictionPolicy(capacity=cache_size)
@@ -121,6 +128,11 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
             time.sleep(interval)
             continue
 
+        # ── Shuffle events to break sequential-scan pattern ──────────────────
+        # Without shuffling, psutil always returns processes in the same order,
+        # which looks like a sequential scan → LRU/ARC/LFU thrash at 100%.
+        random.shuffle(events)
+
         added_this_round = []
         evicted_this_round = []
 
@@ -132,8 +144,6 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                 "region":  ev.region_name,
             }
 
-            # Update phase classifier
-            phase_clf.update(page_id, False)
             dqn_policy.set_phase(phase_clf.phase_id)
 
             # Feed to all caches
@@ -143,18 +153,25 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                 after_pages = frozenset(cache._pages)
                 trackers[name].record(is_hit)
 
-                # Track what was added/evicted in DQN cache
                 if name == "DQN":
+                    # Update phase classifier with real hit status
+                    phase_clf.update(page_id, is_hit)
+
                     new_pages = after_pages - before_pages
                     removed_pages = before_pages - after_pages
+
                     for p in new_pages:
                         info = page_id_to_region.get(p, {})
+                        # Init score = median of existing pages so one new page
+                        # doesn't dominate the colour scale as an outlier
+                        existing = [s["score"] for s in slot_info.values()]
+                        init_score = sorted(existing)[len(existing)//2] if existing else 0.3
                         slot_info[p] = {
-                            "page_id": p,
-                            "process": info.get("process", "?")[:14],
-                            "region":  info.get("region", "?")[:20],
+                            "page_id":    p,
+                            "process":    info.get("process", "?")[:14],
+                            "region":     info.get("region",  "?")[:20],
                             "added_step": step,
-                            "score": 0.5,
+                            "score":      init_score,
                         }
                         added_this_round.append(p)
 
@@ -162,31 +179,49 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                         evicted_this_round.append(p)
                         slot_info.pop(p, None)
 
-            # Capture DQN eviction explanation
-            if dqn_policy.last_eviction_details and evicted_this_round:
+            # Capture DQN eviction explanation + update ALL slot scores
+            if dqn_policy.last_eviction_details:
                 ev_det = dqn_policy.last_eviction_details
-                evicted_page = ev_det.get("evicted_page")
                 all_scores = ev_det.get("all_scores", {})
 
-                # Update scores in slot_info
                 for pid, score in all_scores.items():
                     if pid in slot_info:
                         slot_info[pid]["score"] = score
 
-                # Build eviction log entry
-                if evicted_page is not None:
-                    info = page_id_to_region.get(evicted_page, {})
-                    log_entry = {
-                        "step":    step,
-                        "page":    evicted_page,
-                        "process": info.get("process", "?")[:18],
-                        "region":  info.get("region",  "?")[:28],
-                        "score":   round(ev_det.get("evict_score", 0), 4),
-                        "phase":   PHASE_NAMES.get(phase_clf.phase_id, "?"),
-                        "reason":  _eviction_reason(ev_det.get("evict_score", 0.5)),
-                    }
-                    with state_lock:
-                        simulation_state["eviction_log"].appendleft(log_entry)
+                if evicted_this_round:
+                    evicted_page = ev_det.get("evicted_page")
+                    if evicted_page is not None:
+                        info = page_id_to_region.get(evicted_page, {})
+                        ev_score = ev_det.get("evict_score", 0)
+                        # Pick eviction reason based on normalised rank
+                        n_cached = len(all_scores)
+                        rank = sum(1 for s in all_scores.values() if s <= ev_score)
+                        rank_pct = rank / max(n_cached, 1)
+                        log_entry = {
+                            "step":    step,
+                            "page":    evicted_page,
+                            "process": info.get("process", "?")[:18],
+                            "region":  info.get("region",  "?")[:28],
+                            "score":   round(ev_score, 5),
+                            "phase":   PHASE_NAMES.get(phase_clf.phase_id, "?"),
+                            "reason":  _eviction_reason_rank(rank_pct),
+                        }
+                        with state_lock:
+                            simulation_state["eviction_log"].appendleft(log_entry)
+
+        # ── Proactive score refresh every 5 steps ────────────────────────────
+        # Ensures all tiles show current DQN opinion, not stale values from
+        # the last eviction round.
+        if step % 5 == 0 and slot_info:
+            cached_pages = list(caches["DQN"]._pages)
+            if cached_pages:
+                try:
+                    fresh_scores, _ = dqn_policy._score_all_pages(cached_pages)
+                    for pid, score in fresh_scores.items():
+                        if pid in slot_info:
+                            slot_info[pid]["score"] = score
+                except Exception:
+                    pass
 
         # Record miss rates
         for name, tracker in trackers.items():
@@ -291,6 +326,20 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
             pass
 
         time.sleep(max(0, interval - 0.05))
+
+
+def _eviction_reason_rank(rank_pct: float) -> str:
+    """Describe why a page was evicted based on its score rank in the cache."""
+    if rank_pct < 0.05:
+        return "Coldest page — clear eviction choice"
+    elif rank_pct < 0.15:
+        return "Very cold — rarely accessed recently"
+    elif rank_pct < 0.30:
+        return "Cold — below-average access pattern"
+    elif rank_pct < 0.50:
+        return "Below median — evicted under cache pressure"
+    else:
+        return "Warm page — evicted due to capacity pressure"
 
 
 def _eviction_reason(score: float) -> str:
