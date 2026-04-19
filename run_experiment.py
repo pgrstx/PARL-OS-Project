@@ -155,16 +155,18 @@ Examples:
         mode_plots(args)
     elif args.mode == "monitor":
         print("=" * 60)
-        print("PARL Real-Time OS Memory Monitor")
+        print("PARL Real-Time Web Dashboard")
+        print(f"  Open: http://localhost:5050")
         print("=" * 60)
-        from realtime.dashboard import LiveDashboard
-        dash = LiveDashboard(
-            sample_interval=args.monitor_interval,
-            model_path=args.model_path,
-        )
-        dash.CACHE_SIZE = args.cache_size
+        from realtime.server import run_server
         try:
-            dash.run()
+            run_server(
+                host="0.0.0.0",
+                port=5050,
+                model_path=args.model_path,
+                cache_size=args.cache_size,
+                interval=args.monitor_interval,
+            )
         except KeyboardInterrupt:
             pass
     elif args.mode == "all":

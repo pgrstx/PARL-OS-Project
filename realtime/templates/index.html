@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PARL — Live Cache Memory Visualizer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --bg2:     #161b22;
+    --bg3:     #1c2333;
+    --border:  #30363d;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+    --green:   #3fb950;
+    --red:     #f85149;
+    --blue:    #58a6ff;
+    --yellow:  #d29922;
+    --purple:  #bc8cff;
+    --orange:  #ffa657;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ──────────────────────────────────────────────────── */
+  header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: 0.5px;
+  }
+  .step-counter {
+    font-family: monospace;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .phase-badge {
+    padding: 3px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    transition: background 0.5s, color 0.5s;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+    flex-shrink: 0;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%  { opacity: 0.4; }
+  }
+  .miss-summary {
+    margin-left: auto;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+  .miss-pill {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+  }
+  .miss-pill span { font-weight: 700; }
+  .miss-pill.dqn span { color: var(--green); }
+  .miss-pill.lru span { color: var(--muted); }
+  .miss-pill.lfu span { color: var(--orange); }
+  .miss-pill.arc span { color: var(--purple); }
+
+  /* ── Main layout ─────────────────────────────────────────────── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    grid-template-rows: 1fr;
+    gap: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Left panel ───────────────────────────────────────────────── */
+  .left {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--border);
+  }
+
+  /* ── Cache grid ───────────────────────────────────────────────── */
+  .cache-section {
+    flex: 1;
+    padding: 14px 16px 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .cache-legend {
+    display: flex;
+    gap: 12px;
+    margin-left: auto;
+    align-items: center;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 3px;
+  }
+
+  #cache-grid {
+    display: grid;
+    gap: 4px;
+    flex: 1;
+    align-content: start;
+  }
+
+  .cache-slot {
+    border-radius: 6px;
+    padding: 5px 7px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    cursor: default;
+    transition: background 0.6s ease, border-color 0.6s ease, transform 0.15s;
+    border: 1.5px solid transparent;
+    min-height: 44px;
+    position: relative;
+    overflow: hidden;
+  }
+  .cache-slot:hover {
+    transform: scale(1.04);
+    z-index: 10;
+    border-color: rgba(255,255,255,0.3) !important;
+  }
+  .cache-slot.empty {
+    background: rgba(255,255,255,0.03);
+    border-color: var(--border);
+  }
+  .cache-slot.just-added {
+    animation: addAnim 1.2s ease;
+  }
+  .cache-slot.just-evicted {
+    animation: evictAnim 0.8s ease forwards;
+  }
+  @keyframes addAnim {
+    0%   { background: #1d4ed8; transform: scale(1.08); border-color: #60a5fa; }
+    40%  { background: #1d4ed8; }
+    100% { }
+  }
+  @keyframes evictAnim {
+    0%   { background: #b91c1c; transform: scale(1.05); border-color: #f87171; }
+    60%  { background: #7f1d1d; transform: scale(0.95); opacity: 0.6; }
+    100% { background: rgba(255,255,255,0.03); border-color: var(--border); opacity: 1; transform: scale(1); }
+  }
+  .slot-process {
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.3;
+  }
+  .slot-region {
+    font-size: 9px;
+    color: rgba(255,255,255,0.55);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .slot-score-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    border-radius: 0 0 5px 5px;
+    transition: width 0.8s ease, background 0.6s;
+  }
+  .score-label {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    font-size: 8px;
+    font-family: monospace;
+    opacity: 0.7;
+  }
+
+  /* ── Chart section ───────────────────────────────────────────── */
+  .chart-section {
+    height: 140px;
+    border-top: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    flex-direction: column;
+  }
+  .chart-section canvas {
+    flex: 1;
+  }
+
+  /* ── Right panel ─────────────────────────────────────────────── */
+  .right {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panel {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+    flex-shrink: 0;
+  }
+  .panel:last-child { border-bottom: none; flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
+  /* System stats */
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 5px;
+    font-size: 12px;
+  }
+  .stat-label { color: var(--muted); }
+  .stat-val   { font-family: monospace; font-weight: 600; }
+  .ram-bar-bg {
+    height: 6px;
+    background: var(--bg3);
+    border-radius: 3px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .ram-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 1s ease, background 1s;
+  }
+
+  /* Process list */
+  .proc-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-size: 11px;
+  }
+  .proc-row:last-child { border-bottom: none; }
+  .proc-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .proc-rss  { font-family: monospace; color: var(--orange); min-width: 52px; text-align: right; }
+  .proc-pct  { min-width: 38px; text-align: right; color: var(--muted); }
+  .proc-bar-bg { width: 50px; height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+  .proc-bar-fill { height: 100%; background: var(--blue); border-radius: 2px; transition: width 0.8s; }
+
+  /* Eviction log */
+  .log-scroll {
+    overflow-y: auto;
+    flex: 1;
+  }
+  .log-scroll::-webkit-scrollbar { width: 4px; }
+  .log-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .log-entry {
+    padding: 7px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-size: 11px;
+  }
+  .log-entry:first-child { animation: logIn 0.4s ease; }
+  @keyframes logIn {
+    from { background: rgba(248, 81, 73, 0.15); }
+    to   { background: transparent; }
+  }
+  .log-step {
+    font-family: monospace;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .log-evicted {
+    color: var(--red);
+    font-weight: 600;
+    margin: 2px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .log-reason {
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .log-score {
+    font-family: monospace;
+    font-size: 10px;
+  }
+
+  /* Phase timeline */
+  .phase-indicator {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .phase-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .phase-bars {
+    display: flex;
+    gap: 3px;
+    height: 20px;
+    align-items: stretch;
+  }
+  .phase-bar-item {
+    flex: 1;
+    border-radius: 3px;
+    opacity: 0.3;
+    transition: opacity 0.5s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .phase-bar-item.active {
+    opacity: 1;
+  }
+
+  /* Score explanation */
+  .score-explainer {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 10px;
+    font-size: 11px;
+  }
+  .feat-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .feat-name { color: var(--muted); min-width: 80px; font-size: 10px; }
+  .feat-bar-bg { flex: 1; height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
+  .feat-bar-fill { height: 100%; background: var(--blue); border-radius: 3px; transition: width 0.6s; }
+
+  /* Tooltip */
+  #tooltip {
+    position: fixed;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 1000;
+    display: none;
+    min-width: 200px;
+    max-width: 280px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  #tooltip .tt-title { font-weight: 700; margin-bottom: 6px; color: var(--blue); }
+  #tooltip .tt-row   { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  #tooltip .tt-label { color: var(--muted); }
+  #tooltip .tt-val   { font-family: monospace; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="status-dot"></div>
+  <h1>PARL — Live Cache Visualizer</h1>
+  <div class="phase-badge" id="phase-badge">Initializing...</div>
+  <div class="step-counter">Step: <span id="step-num">0</span></div>
+  <div class="miss-summary">
+    <div class="miss-pill dqn">DQN-direct: <span id="mr-dqn">--%</span></div>
+    <div class="miss-pill lru">LRU: <span id="mr-lru">--%</span></div>
+    <div class="miss-pill lfu">LFU: <span id="mr-lfu">--%</span></div>
+    <div class="miss-pill arc">ARC: <span id="mr-arc">--%</span></div>
+  </div>
+</header>
+
+<!-- ── Main layout ─────────────────────────────────────────────────────────── -->
+<div class="main">
+
+  <!-- Left: Cache grid + chart -->
+  <div class="left">
+    <div class="cache-section">
+      <div class="section-title">
+        Cache Memory — {{ cache_size }} Slots
+        <span style="color:var(--muted);font-size:10px;font-weight:400;text-transform:none">
+          DQN scores each page, evicts lowest
+        </span>
+        <div class="cache-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#1d4ed8"></div>Just added</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#b91c1c"></div>Evicting</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#15803d"></div>High score (keep)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#7f1d1d"></div>Low score (evict)</div>
+        </div>
+      </div>
+      <div id="cache-grid"></div>
+    </div>
+
+    <div class="chart-section">
+      <div class="section-title">Rolling Miss Rate — last 200 samples</div>
+      <canvas id="miss-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Right: Info panels -->
+  <div class="right">
+
+    <!-- System memory -->
+    <div class="panel">
+      <div class="section-title">System Memory</div>
+      <div class="stat-row">
+        <span class="stat-label">RAM Used</span>
+        <span class="stat-val"><span id="ram-used">-</span> / <span id="ram-total">-</span> GB &nbsp;<span id="ram-pct" style="color:var(--muted)">--%</span></span>
+      </div>
+      <div class="ram-bar-bg"><div class="ram-bar-fill" id="ram-bar" style="width:0%"></div></div>
+      <div class="stat-row" style="margin-top:8px">
+        <span class="stat-label">Swap</span>
+        <span class="stat-val" id="swap-val">- GB</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Pageins</span>
+        <span class="stat-val" id="pageins">-</span>
+      </div>
+    </div>
+
+    <!-- Phase detector -->
+    <div class="panel">
+      <div class="section-title">Phase Detection</div>
+      <div class="phase-indicator">
+        <div class="phase-bars">
+          <div class="phase-bar-item" id="pb-0" style="background:#3b82f6">Init</div>
+          <div class="phase-bar-item" id="pb-1" style="background:#22c55e">Steady</div>
+          <div class="phase-bar-item" id="pb-2" style="background:#f59e0b">Scan</div>
+          <div class="phase-bar-item" id="pb-3" style="background:#ef4444">Random</div>
+          <div class="phase-bar-item" id="pb-4" style="background:#a855f7">Hotspot</div>
+        </div>
+        <div class="phase-desc" id="phase-desc">Waiting for phase detection warm-up...</div>
+      </div>
+    </div>
+
+    <!-- Top processes -->
+    <div class="panel">
+      <div class="section-title">Top Processes by RSS</div>
+      <div id="proc-list"></div>
+    </div>
+
+    <!-- Eviction log -->
+    <div class="panel" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
+      <div class="section-title">Eviction Log <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--muted)">(why each page was removed)</span></div>
+      <div class="log-scroll" id="eviction-log"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+const CACHE_SIZE = {{ cache_size }};
+const GRID_COLS  = Math.ceil(Math.sqrt(CACHE_SIZE * 1.5));
+
+let currentSlots  = {};   // page_id → slot element
+let prevAddedSet  = new Set();
+let prevEvictSet  = new Set();
+
+const phaseDescs = {
+  0: "Initialization — many compulsory misses, cold start. Best policy: anything.",
+  1: "Steady State — high temporal locality, same pages reused repeatedly. LRU works great.",
+  2: "Sequential Scan — pages accessed once in order, no reuse. LRU thrashes badly. CLOCK better.",
+  3: "Random Access — uniform random, frequency matters more than recency. LFU wins.",
+  4: "Hotspot — 80% accesses hit 20 hot pages. Small working set, ARC/PARL ideal.",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache grid setup
+// ─────────────────────────────────────────────────────────────────────────────
+const grid = document.getElementById('cache-grid');
+grid.style.gridTemplateColumns = `repeat(${GRID_COLS}, 1fr)`;
+
+// Pre-create all slots
+const slotEls = [];
+for (let i = 0; i < CACHE_SIZE; i++) {
+  const el = document.createElement('div');
+  el.className = 'cache-slot empty';
+  el.innerHTML = `
+    <div class="slot-process" style="color:var(--muted)">empty</div>
+    <div class="slot-region"></div>
+    <div class="slot-score-bar"></div>
+    <div class="score-label"></div>
+  `;
+  slotEls.push(el);
+  grid.appendChild(el);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chart
+// ─────────────────────────────────────────────────────────────────────────────
+const chartCtx = document.getElementById('miss-chart').getContext('2d');
+const missChart = new Chart(chartCtx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      { label: 'DQN-direct', data: [], borderColor: '#3fb950', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: false },
+      { label: 'LRU',        data: [], borderColor: '#8b949e', borderWidth: 1.5, pointRadius: 0, tension: 0.4, fill: false },
+      { label: 'LFU',        data: [], borderColor: '#ffa657', borderWidth: 1.5, pointRadius: 0, tension: 0.4, fill: false },
+      { label: 'ARC',        data: [], borderColor: '#bc8cff', borderWidth: 1.5, pointRadius: 0, tension: 0.4, fill: false },
+    ],
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: { labels: { color: '#8b949e', font: { size: 10 }, boxWidth: 12 } }
+    },
+    scales: {
+      x: { display: false },
+      y: {
+        min: 0, max: 100,
+        ticks: { color: '#8b949e', font: { size: 10 }, callback: v => v + '%' },
+        grid:  { color: '#21262d' },
+      }
+    }
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function scoreToColor(score) {
+  // 0.0 → dark red,  0.5 → amber,  1.0 → green
+  const r = score < 0.5 ? 160 : Math.round(160 * (1 - score) * 2);
+  const g = score > 0.5 ? 180 : Math.round(180 * score * 2);
+  const b = 40;
+  const alpha = 0.55 + score * 0.35;
+  return { bg: `rgba(${r},${g},${b},${alpha})`, bar: `rgb(${r},${g},${b})` };
+}
+
+function scoreToText(score) {
+  if (score < 0.2) return '🔴';
+  if (score < 0.4) return '🟠';
+  if (score < 0.6) return '🟡';
+  if (score < 0.8) return '🟢';
+  return '✅';
+}
+
+function fmtNum(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return String(n);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Render update
+// ─────────────────────────────────────────────────────────────────────────────
+function renderUpdate(data) {
+  // ── Header
+  document.getElementById('step-num').textContent = fmtNum(data.step);
+
+  const phase = data.phase_id ?? 0;
+  const phaseBadge = document.getElementById('phase-badge');
+  phaseBadge.textContent = `Phase ${phase}: ${data.phase_name}`;
+  phaseBadge.style.background = data.phase_color + '33';
+  phaseBadge.style.color = data.phase_color;
+  phaseBadge.style.border = `1px solid ${data.phase_color}55`;
+
+  // Phase bars
+  for (let i = 0; i < 5; i++) {
+    const pb = document.getElementById(`pb-${i}`);
+    if (pb) pb.classList.toggle('active', i === phase);
+  }
+  const descEl = document.getElementById('phase-desc');
+  if (descEl) descEl.textContent = phaseDescs[phase] || '';
+
+  // ── Miss rates
+  const mrs = data.miss_rates || {};
+  const lastOf = arr => arr && arr.length ? arr[arr.length-1].toFixed(1) + '%' : '--%';
+  document.getElementById('mr-dqn').textContent = lastOf(mrs.DQN);
+  document.getElementById('mr-lru').textContent = lastOf(mrs.LRU);
+  document.getElementById('mr-lfu').textContent = lastOf(mrs.LFU);
+  document.getElementById('mr-arc').textContent = lastOf(mrs.ARC);
+
+  // ── Chart
+  const n = (mrs.DQN || []).length;
+  const labels = Array.from({length: n}, (_, i) => i);
+  missChart.data.labels = labels;
+  missChart.data.datasets[0].data = mrs.DQN || [];
+  missChart.data.datasets[1].data = mrs.LRU || [];
+  missChart.data.datasets[2].data = mrs.LFU || [];
+  missChart.data.datasets[3].data = mrs.ARC || [];
+  missChart.update('none');
+
+  // ── Cache grid
+  const slots = data.cache_slots || [];
+  const addedSet  = new Set(data.last_added  || []);
+  const evictSet  = new Set(data.last_evicted || []);
+  const activeIds = new Set(slots.map(s => s.page_id));
+
+  slots.forEach((slot, idx) => {
+    if (idx >= slotEls.length) return;
+    const el = slotEls[idx];
+    const colors = scoreToColor(slot.score);
+
+    el.className = 'cache-slot';
+    if (addedSet.has(slot.page_id))  el.classList.add('just-added');
+    if (evictSet.has(slot.page_id))  el.classList.add('just-evicted');
+
+    el.style.background   = colors.bg;
+    el.style.borderColor  = colors.bar + '80';
+
+    const proc  = el.querySelector('.slot-process');
+    const reg   = el.querySelector('.slot-region');
+    const bar   = el.querySelector('.slot-score-bar');
+    const score = el.querySelector('.score-label');
+
+    proc.style.color = '#e6edf3';
+    proc.textContent = slot.process;
+    reg.textContent  = slot.region.replace(slot.process + ':', '');
+    bar.style.width  = (slot.score * 100) + '%';
+    bar.style.background = colors.bar;
+    score.textContent = scoreToText(slot.score);
+
+    // Tooltip data
+    el.dataset.pageId  = slot.page_id;
+    el.dataset.process = slot.process;
+    el.dataset.region  = slot.region;
+    el.dataset.score   = slot.score;
+    el.dataset.age     = slot.age;
+  });
+
+  // Empty remaining slots
+  for (let i = slots.length; i < slotEls.length; i++) {
+    const el = slotEls[i];
+    el.className = 'cache-slot empty';
+    el.style.background  = '';
+    el.style.borderColor = '';
+    el.querySelector('.slot-process').textContent = 'empty';
+    el.querySelector('.slot-process').style.color = 'var(--muted)';
+    el.querySelector('.slot-region').textContent  = '';
+    el.querySelector('.slot-score-bar').style.width = '0%';
+    el.querySelector('.score-label').textContent = '';
+  }
+
+  // ── System stats
+  const sys = data.system || {};
+  document.getElementById('ram-used').textContent  = sys.used_gb  || '-';
+  document.getElementById('ram-total').textContent = sys.total_gb || '-';
+  document.getElementById('ram-pct').textContent   = (sys.used_pct || 0) + '%';
+  const pct = sys.used_pct || 0;
+  const ramBar = document.getElementById('ram-bar');
+  ramBar.style.width = pct + '%';
+  ramBar.style.background = pct > 85 ? 'var(--red)' : pct > 70 ? 'var(--yellow)' : 'var(--green)';
+  document.getElementById('swap-val').textContent  = (sys.swap_gb || 0) + ' GB';
+  document.getElementById('pageins').textContent   = fmtNum(sys.pageins || 0);
+
+  // ── Process list
+  const procList = document.getElementById('proc-list');
+  const procs = data.processes || [];
+  procList.innerHTML = procs.map(p => `
+    <div class="proc-row">
+      <div class="proc-name" title="${p.name}">${p.name}</div>
+      <div class="proc-bar-bg"><div class="proc-bar-fill" style="width:${Math.min(p.pct*3,100)}%"></div></div>
+      <div class="proc-rss">${p.rss} MB</div>
+      <div class="proc-pct">${p.pct.toFixed(1)}%</div>
+    </div>
+  `).join('');
+
+  // ── Eviction log
+  const log = document.getElementById('eviction-log');
+  const entries = data.eviction_log || [];
+  const newHtml = entries.map((e, i) => `
+    <div class="log-entry">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <span class="log-evicted">✗ ${e.process}:${e.region.split(':').slice(-1)[0]}</span>
+        <span class="log-score" style="color:${scoreColor(e.score)}">score=${e.score}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between">
+        <span class="log-reason">${e.reason}</span>
+        <span class="log-step">step ${fmtNum(e.step)} · ${e.phase}</span>
+      </div>
+    </div>
+  `).join('');
+
+  if (log.innerHTML !== newHtml) {
+    log.innerHTML = newHtml;
+  }
+}
+
+function scoreColor(score) {
+  if (score < 0.25) return '#f85149';
+  if (score < 0.4)  return '#ffa657';
+  if (score < 0.55) return '#d29922';
+  return '#3fb950';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tooltip
+// ─────────────────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+grid.addEventListener('mousemove', e => {
+  const slot = e.target.closest('.cache-slot');
+  if (!slot || slot.classList.contains('empty')) {
+    tooltip.style.display = 'none';
+    return;
+  }
+  const score = parseFloat(slot.dataset.score || 0);
+  tooltip.style.display = 'block';
+  tooltip.style.left = (e.clientX + 14) + 'px';
+  tooltip.style.top  = (e.clientY - 10) + 'px';
+  tooltip.innerHTML = `
+    <div class="tt-title">Page ${slot.dataset.pageId}</div>
+    <div class="tt-row"><span class="tt-label">Process</span><span class="tt-val">${slot.dataset.process}</span></div>
+    <div class="tt-row"><span class="tt-label">Region</span><span class="tt-val">${(slot.dataset.region||'').split(':').slice(-1)[0]}</span></div>
+    <div class="tt-row"><span class="tt-label">Keep score</span><span class="tt-val" style="color:${scoreColor(score)}">${score.toFixed(4)}</span></div>
+    <div class="tt-row"><span class="tt-label">Age (steps)</span><span class="tt-val">${slot.dataset.age}</span></div>
+    <div style="margin-top:6px;font-size:10px;color:var(--muted)">
+      ${score < 0.3 ? '⚠ LOW SCORE — eviction candidate' : score > 0.7 ? '✅ HIGH SCORE — safely kept' : '→ Moderate score'}
+    </div>
+  `;
+});
+grid.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SSE stream connection
+// ─────────────────────────────────────────────────────────────────────────────
+function connectSSE() {
+  const evtSource = new EventSource('/stream');
+
+  evtSource.onmessage = e => {
+    if (!e.data || e.data === '{}') return;
+    try {
+      const data = JSON.parse(e.data);
+      renderUpdate(data);
+    } catch(err) {
+      console.warn('Parse error:', err);
+    }
+  };
+
+  evtSource.onerror = () => {
+    console.warn('SSE disconnected, retrying in 2s...');
+    evtSource.close();
+    setTimeout(connectSSE, 2000);
+  };
+}
+
+// Load initial state then connect
+fetch('/state')
+  .then(r => r.json())
+  .then(data => { renderUpdate(data); connectSSE(); })
+  .catch(() => connectSSE());
+</script>
+</body>
+</html>

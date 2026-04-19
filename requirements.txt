@@ -7,3 +7,4 @@ pandas>=2.0
 tqdm>=4.65
 psutil>=5.9
 rich>=13.0
+flask>=3.0
