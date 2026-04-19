@@ -1,7 +1,7 @@
 # PARL — Phase-Aware Reinforcement Learning Based Page Replacement Policy
 
-**CSD 204 Operating Systems | IIT 2025**  
-Team: Pranav Gupta, Ananya Singh, Rohan Mehta, Kiran Patel
+**CSD 204 Operating Systems | SNU**  
+Team: Pranav Gupta(2410110241), Shambhavi Sharma(2410110313), Mohak Joshi(2410110204)
 
 ---
 
