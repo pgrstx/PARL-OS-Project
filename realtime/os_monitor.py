@@ -49,6 +49,8 @@ class PageEvent:
     rss_bytes: int         # resident set size of this region
     event_type: str        # "access" | "evict" | "fault"
     timestamp: float
+    cpu_percent: float = 0.0   # CPU % of owning process at sample time
+    rss_delta: int = 0         # RSS change since last sample (+ = growing, - = shrinking)
 
 
 @dataclass
@@ -61,6 +63,7 @@ class ProcessMemorySnapshot:
     pct: float             # % of total RAM
     page_faults: int       # cumulative page faults
     regions: list = field(default_factory=list)  # list of (region_name, rss)
+    cpu_percent: float = 0.0
 
 
 class OSMemoryMonitor:
@@ -129,6 +132,7 @@ class OSMemoryMonitor:
                     pct=info.get("memory_percent") or 0.0,
                     page_faults=getattr(mi, "pfaults", getattr(mi, "num_page_faults", 0)),
                 )
+                snap.cpu_percent = info.get("cpu_percent") or 0.0
                 # Break RSS into logical "regions" by size buckets so we get more
                 # granular page events per process (simulates sub-process page tracking)
                 n_buckets = max(1, min(8, mi.rss // (1024 * 1024)))  # 1 bucket per MB, max 8
@@ -194,6 +198,7 @@ class OSMemoryMonitor:
         for proc_snap in processes:
             pid = proc_snap.pid
             name = proc_snap.name[:20]
+            cpu_pct = proc_snap.cpu_percent
 
             # Use pre-computed regions from ProcessMemorySnapshot (no memory_maps needed)
             regions = proc_snap.regions if proc_snap.regions else [(f"{name}:total", proc_snap.rss)]
@@ -206,18 +211,15 @@ class OSMemoryMonitor:
 
                 prev_rss = prev_regions.get(region_name, 0)
                 page_id = self._get_page_id(pid, region_name)
+                rss_delta = curr_rss - prev_rss
 
                 if prev_rss == 0 and curr_rss > 0:
-                    # New region — page fault (loaded from disk)
                     ev_type = "fault"
                 elif curr_rss > prev_rss:
-                    # Region grew — pages accessed (loaded into RAM)
                     ev_type = "access"
                 elif curr_rss < prev_rss:
-                    # Region shrank — pages evicted
                     ev_type = "evict"
                 else:
-                    # Unchanged — still in cache (implicit access)
                     ev_type = "access"
 
                 events.append(PageEvent(
@@ -228,6 +230,8 @@ class OSMemoryMonitor:
                     rss_bytes=curr_rss,
                     event_type=ev_type,
                     timestamp=now,
+                    cpu_percent=cpu_pct,
+                    rss_delta=rss_delta,
                 ))
 
                 if len(events) >= self._max_events:

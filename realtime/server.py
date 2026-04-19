@@ -140,8 +140,10 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
             step += 1
             page_id = ev.page_id
             page_id_to_region[page_id] = {
-                "process": ev.process_name,
-                "region":  ev.region_name,
+                "process":   ev.process_name,
+                "region":    ev.region_name,
+                "cpu_pct":   ev.cpu_percent,
+                "rss_delta": ev.rss_delta,
             }
 
             dqn_policy.set_phase(phase_clf.phase_id)
@@ -162,16 +164,17 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
 
                     for p in new_pages:
                         info = page_id_to_region.get(p, {})
-                        # Init score = median of existing pages so one new page
-                        # doesn't dominate the colour scale as an outlier
-                        existing = [s["score"] for s in slot_info.values()]
-                        init_score = sorted(existing)[len(existing)//2] if existing else 0.3
+                        cpu_pct  = info.get("cpu_pct", 0.0)
+                        rss_delta = info.get("rss_delta", 0)
+                        init_score = _cpu_score(cpu_pct, rss_delta)
                         slot_info[p] = {
                             "page_id":    p,
                             "process":    info.get("process", "?")[:14],
                             "region":     info.get("region",  "?")[:20],
                             "added_step": step,
                             "score":      init_score,
+                            "cpu_pct":    cpu_pct,
+                            "rss_delta":  rss_delta,
                         }
                         added_this_round.append(p)
 
@@ -210,18 +213,33 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                             simulation_state["eviction_log"].appendleft(log_entry)
 
         # ── Proactive score refresh every 5 steps ────────────────────────────
-        # Ensures all tiles show current DQN opinion, not stale values from
-        # the last eviction round.
+        # Primary signal: CPU% of the owning process (high CPU = hot pages, keep).
+        # DQN score blends in gradually as the network trains (first 10K evictions).
+        # This ensures meaningful colour spread immediately on a live OS stream
+        # where all pages are "accessed" every sample (recency/frequency useless).
         if step % 5 == 0 and slot_info:
             cached_pages = list(caches["DQN"]._pages)
             if cached_pages:
                 try:
-                    fresh_scores, _ = dqn_policy._score_all_pages(cached_pages)
-                    for pid, score in fresh_scores.items():
-                        if pid in slot_info:
-                            slot_info[pid]["score"] = score
+                    dqn_scores, _ = dqn_policy._score_all_pages(cached_pages)
+                    n_trained = dqn_policy._eviction_count
+                    dqn_blend = min(0.4, n_trained / 25_000)   # max 40% DQN weight
+                    for pid in cached_pages:
+                        if pid not in slot_info:
+                            continue
+                        cpu_pct   = slot_info[pid].get("cpu_pct", 0.0)
+                        rss_delta = slot_info[pid].get("rss_delta", 0)
+                        cpu_s = _cpu_score(cpu_pct, rss_delta)
+                        dqn_s = dqn_scores.get(pid, cpu_s)
+                        slot_info[pid]["score"] = (1 - dqn_blend) * cpu_s + dqn_blend * dqn_s
                 except Exception:
                     pass
+
+        # ── Update cpu_pct/rss_delta in slot_info from latest events ─────────
+        for ev in events:
+            if ev.page_id in slot_info:
+                slot_info[ev.page_id]["cpu_pct"]   = ev.cpu_percent
+                slot_info[ev.page_id]["rss_delta"]  = ev.rss_delta
 
         # Record miss rates
         for name, tracker in trackers.items():
@@ -326,6 +344,35 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
             pass
 
         time.sleep(max(0, interval - 0.05))
+
+
+def _cpu_score(cpu_pct: float, rss_delta: int = 0) -> float:
+    """
+    Convert process CPU% + RSS delta to a keep-score in [0, 1].
+
+    Why CPU%?  In live OS monitoring every page is "accessed" every sample
+    (same processes run continuously), so recency/frequency features are
+    identical for all pages.  CPU% is the real signal: a process burning
+    CPU has hot pages that must stay; a sleeping process has cold pages
+    that are good eviction candidates.
+
+      cpu_pct=0,  rss stable  → 0.10  (idle, cold — evict first)
+      cpu_pct=0,  rss growing → 0.35  (allocating but not running yet)
+      cpu_pct=5,  rss stable  → ~0.55
+      cpu_pct=20, rss stable  → ~0.80
+      cpu_pct=50+             → ~0.95  (very hot)
+      any,        rss shrinking → -0.15 penalty (OS already reclaiming)
+    """
+    # Normalise: 50% CPU → ~1.0 base
+    base = min(cpu_pct / 50.0, 1.0)
+    # Small floor so even idle processes aren't all identical at 0
+    base = 0.10 + 0.85 * base
+    # RSS delta bonus/penalty
+    if rss_delta > 0:
+        base = min(base + 0.08, 1.0)   # growing = hotter
+    elif rss_delta < 0:
+        base = max(base - 0.15, 0.0)   # shrinking = OS already evicting
+    return round(base, 4)
 
 
 def _eviction_reason_rank(rank_pct: float) -> str:

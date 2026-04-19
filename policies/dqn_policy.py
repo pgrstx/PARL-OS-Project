@@ -162,6 +162,9 @@ class DQNEvictionPolicy(Policy):
         # Per-page stats
         self._page_stats: dict[int, PageStats] = {}
 
+        # Live OS signals: page_id → {cpu_pct, rss_delta}
+        self._cpu_info: dict[int, dict] = {}
+
         # Eviction log: list of (evicted_page_id, eviction_step, feature_vector)
         self._eviction_log: deque = deque(maxlen=self.BUFFER_SIZE)
 
@@ -179,6 +182,13 @@ class DQNEvictionPolicy(Policy):
 
     def set_phase(self, phase_id: int):
         self._phase_id = phase_id
+
+    def set_cpu_info(self, page_id: int, cpu_pct: float, rss_delta: int):
+        """Called by server.py to attach live OS signals to a page."""
+        if page_id not in self._cpu_info:
+            self._cpu_info[page_id] = {}
+        self._cpu_info[page_id]["cpu_pct"]   = cpu_pct
+        self._cpu_info[page_id]["rss_delta"]  = rss_delta
 
     def on_access(self, page_id: int, is_hit: bool, cache_full: bool,
                   current_pages=None) -> Optional[int]:
@@ -273,18 +283,27 @@ class DQNEvictionPolicy(Policy):
         with torch.no_grad():
             raw_scores = self._net(X).cpu().numpy()
 
-        # Blend with heuristic until training has warmed up
-        trained_enough = self._eviction_count >= self.TRAIN_INTERVAL * 2
-        blend = min(1.0, self._eviction_count / max(self.TRAIN_INTERVAL * 2, 1))
+        # Heuristic: CPU% of owning process is the real "hotness" signal for
+        # live OS monitoring.  recency/frequency are all 1.0 (every process
+        # sampled every second) so they carry no information.
+        # DQN blend is kept low (max 40%) — the NN has unreliable gradients
+        # when the reward is dominated by process re-use patterns.
+        dqn_blend = min(0.4, self._eviction_count / 25_000)
 
         scores = {}
         for i, p in enumerate(pages):
             nn_score = float(raw_scores[i])
-            f = feature_list[i]
-            # heuristic keep-score from recency, frequency, ird
-            heuristic = float(0.4 * f[0] + 0.4 * f[1] + 0.2 * f[3])
-            # linearly blend from heuristic → network as training progresses
-            scores[p] = blend * nn_score + (1.0 - blend) * heuristic
+            cpu_info  = self._cpu_info.get(p, {})
+            cpu_pct   = cpu_info.get("cpu_pct", 0.0)
+            rss_delta = cpu_info.get("rss_delta", 0)
+            # CPU-based heuristic (see _cpu_score comment in server.py)
+            base = min(cpu_pct / 50.0, 1.0)
+            heuristic = 0.10 + 0.85 * base
+            if rss_delta > 0:
+                heuristic = min(heuristic + 0.08, 1.0)
+            elif rss_delta < 0:
+                heuristic = max(heuristic - 0.15, 0.0)
+            scores[p] = (1 - dqn_blend) * heuristic + dqn_blend * nn_score
 
         features_map = {p: feature_list[i] for i, p in enumerate(pages)}
         return scores, features_map
@@ -354,7 +373,18 @@ class DQNEvictionPolicy(Policy):
                 pid for (s, pid) in self._future_accesses
                 if ev["evict_step"] < s <= ev["evict_step"] + self.LOOKAHEAD
             }
-            reward = -1.0 if was_reaccessed else +1.0
+            if was_reaccessed:
+                # Evicted a page that came back → bad eviction, but check CPU:
+                # if process was idle (cpu_pct≈0), penalise less harshly since
+                # even idle processes get re-sampled every tick.
+                cpu_pct = self._cpu_info.get(ev["page_id"], {}).get("cpu_pct", 0.0)
+                if cpu_pct < 1.0:
+                    # Idle process re-sampled — not a meaningful miss
+                    reward = 0.0
+                else:
+                    reward = -1.0
+            else:
+                reward = +1.0
             self._train_buffer.append((ev["features"], reward))
 
     def _train(self):
@@ -393,6 +423,7 @@ class DQNEvictionPolicy(Policy):
 
     def reset(self):
         self._page_stats.clear()
+        self._cpu_info.clear()
         self._step = 0
         self._phase_id = 0
         self._eviction_count = 0
