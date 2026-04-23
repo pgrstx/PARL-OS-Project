@@ -64,6 +64,11 @@ simulation_state = {
     "last_added":    [],
     "last_evicted":  [],
     "running":       True,
+    # Mode control: None = auto-detect from live OS; int 0-4 = force that phase
+    # "synthetic" = run synthetic trace for the forced phase instead of live OS
+    "forced_phase":  None,
+    "sim_mode":      "live",   # "live" | "synthetic"
+    "sort_by":       "score",  # "score" | "process" | "age"
     # Remote machine data (populated by /ubuntu_events POST)
     "remote": {
         "connected":   False,
@@ -123,7 +128,26 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
     miss_history = {name: deque(maxlen=200) for name in caches}
 
     while simulation_state["running"]:
-        events = monitor.sample_events()
+        # Check mode — may switch to synthetic events
+        with state_lock:
+            current_sim_mode  = simulation_state["sim_mode"]
+            current_forced_ph = simulation_state["forced_phase"]
+            current_sort_by   = simulation_state["sort_by"]
+
+        if current_sim_mode == "synthetic" and current_forced_ph is not None:
+            raw_events = _synthetic_events_for_phase(current_forced_ph,
+                                                     cache_size=cache_size)
+            # Convert dicts to PageEvent-compatible objects
+            from types import SimpleNamespace
+            events = [SimpleNamespace(
+                page_id=e["page_id"], process_name=e["process_name"],
+                pid=0, region_name=e["region_name"],
+                rss_bytes=0, event_type="access", timestamp=time.time(),
+                cpu_percent=e["cpu_percent"], rss_delta=e["rss_delta"],
+            ) for e in raw_events]
+        else:
+            events = monitor.sample_events()
+
         if not events:
             time.sleep(interval)
             continue
@@ -288,7 +312,16 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
         ]
 
         # Write state
-        phase_id = phase_clf.phase_id
+        phase_id = current_forced_ph if current_forced_ph is not None else phase_clf.phase_id
+
+        # Sort slots according to current sort_by setting
+        if current_sort_by == "process":
+            slots.sort(key=lambda s: s["process"])
+        elif current_sort_by == "age":
+            slots.sort(key=lambda s: s["age"], reverse=True)   # oldest first
+        else:
+            pass  # already sorted by score (lowest first)
+
         with state_lock:
             simulation_state.update({
                 "step":         step,
@@ -309,6 +342,9 @@ def simulation_thread(model_path: str, cache_size: int, interval: float):
                 "processes":    proc_display,
                 "last_added":   list(added_this_round[-5:]),
                 "last_evicted": list(evicted_this_round[-5:]),
+                "sim_mode":     current_sim_mode,
+                "forced_phase": current_forced_ph,
+                "sort_by":      current_sort_by,
             })
 
         # Push snapshot to SSE queue (non-blocking)
@@ -452,6 +488,88 @@ def get_state():
                 "evictions": list(remote["evictions"])[:10],
             },
         })
+
+
+@app.route("/set_mode", methods=["POST"])
+def set_mode():
+    """
+    Control the simulation mode from the browser UI.
+
+    Body: { "sim_mode": "live"|"synthetic", "forced_phase": null|0|1|2|3|4,
+            "sort_by": "score"|"process"|"age" }
+    """
+    from flask import request
+    data = request.get_json(force=True, silent=True) or {}
+    with state_lock:
+        if "sim_mode" in data:
+            simulation_state["sim_mode"] = data["sim_mode"]
+        if "forced_phase" in data:
+            simulation_state["forced_phase"] = data["forced_phase"]  # None or int
+        if "sort_by" in data:
+            simulation_state["sort_by"] = data["sort_by"]
+    return jsonify({"ok": True,
+                    "sim_mode": simulation_state["sim_mode"],
+                    "forced_phase": simulation_state["forced_phase"],
+                    "sort_by": simulation_state["sort_by"]})
+
+
+def _synthetic_events_for_phase(phase_id: int, n_pages: int = 40,
+                                 cache_size: int = 48) -> list:
+    """
+    Generate a small burst of synthetic PageEvent-like dicts matching the
+    access pattern of the requested phase.  Used when sim_mode == 'synthetic'.
+
+    Phase patterns:
+      0 Init        — uniform random across all pages (cold start)
+      1 Steady      — 80% of accesses hit the same 20% hot pages (LRU-friendly)
+      2 Sequential  — pages accessed in strict order 0..N-1 (LRU killer)
+      3 Random      — pure uniform random (frequency matters)
+      4 Hotspot     — 90% of accesses on 5 hot pages, rest random
+    """
+    import random as _rng
+    events = []
+    phase_names = {0: "Init", 1: "Steady", 2: "Sequential", 3: "Random", 4: "Hotspot"}
+
+    # Synthetic process names per phase for realism
+    phase_procs = {
+        0: ["init", "systemd", "udev", "kworker"],
+        1: ["firefox", "python3", "gnome-shell", "code"],
+        2: ["dd", "rsync", "ffmpeg", "tar"],
+        3: ["stress-ng", "fio", "memtester", "sysbench"],
+        4: ["redis", "postgres", "nginx", "memcached"],
+    }
+    procs = phase_procs.get(phase_id, ["process"])
+
+    if phase_id == 2:
+        # Sequential: strict scan — the LRU killer
+        seq_pages = list(range(n_pages))
+        page_ids = seq_pages[:20]           # 20 events per burst
+    elif phase_id == 4:
+        # Hotspot: 5 hot pages + occasional cold
+        hot = list(range(5))
+        cold = list(range(5, n_pages))
+        page_ids = [_rng.choice(hot) if _rng.random() < 0.9 else _rng.choice(cold)
+                    for _ in range(20)]
+    elif phase_id == 1:
+        # Steady: 20% pages get 80% of hits
+        hot = list(range(int(n_pages * 0.2)))
+        all_p = list(range(n_pages))
+        page_ids = [_rng.choice(hot) if _rng.random() < 0.8 else _rng.choice(all_p)
+                    for _ in range(20)]
+    else:
+        # Init / Random: uniform
+        page_ids = [_rng.randint(0, n_pages - 1) for _ in range(20)]
+
+    for pid in page_ids:
+        cpu = _rng.uniform(5, 80) if phase_id in (1, 4) else _rng.uniform(0, 20)
+        events.append({
+            "page_id":      pid + 10000,          # offset so no collision with live IDs
+            "process_name": _rng.choice(procs),
+            "region_name":  f"region{pid % 4}",
+            "cpu_percent":  cpu,
+            "rss_delta":    _rng.randint(-512, 2048) * 1024,
+        })
+    return events
 
 
 @app.route("/ubuntu_events", methods=["POST"])

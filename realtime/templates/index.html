@@ -408,6 +408,81 @@
   .remote-sys span { color: var(--muted); }
   .remote-sys b    { color: var(--text); font-family: monospace; }
 
+  /* ── Control bar ─────────────────────────────────────────────── */
+  .control-bar {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 7px 18px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .ctrl-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ctrl-label {
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    white-space: nowrap;
+  }
+  .ctrl-btn {
+    padding: 3px 10px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background .2s, color .2s, border-color .2s;
+    white-space: nowrap;
+  }
+  .ctrl-btn:hover { background: #21262d; color: var(--text); }
+  .ctrl-btn.active {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+  }
+  .ctrl-btn.phase-0.active { background:#3b82f6; border-color:#3b82f6; }
+  .ctrl-btn.phase-1.active { background:#22c55e; border-color:#22c55e; }
+  .ctrl-btn.phase-2.active { background:#f59e0b; border-color:#f59e0b; }
+  .ctrl-btn.phase-3.active { background:#ef4444; border-color:#ef4444; }
+  .ctrl-btn.phase-4.active { background:#a855f7; border-color:#a855f7; }
+  .ctrl-btn.mode-live.active  { background:#0ea5e9; border-color:#0ea5e9; }
+  .ctrl-btn.mode-synth.active { background:#f97316; border-color:#f97316; }
+
+  /* Phase explanation drawer */
+  #phase-explainer {
+    display: none;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  #phase-explainer.open { display: flex; gap: 32px; flex-wrap: wrap; }
+  .explainer-col { flex: 1; min-width: 200px; }
+  .explainer-title { font-weight: 700; margin-bottom: 6px; }
+  .explainer-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; font-size: 11px; }
+  .explainer-policy { min-width: 56px; font-weight: 600; }
+  .explainer-bar-bg { flex:1; height:6px; background:var(--bg3); border-radius:3px; overflow:hidden; }
+  .explainer-bar { height:100%; border-radius:3px; }
+  .explainer-verdict { font-size: 10px; color: var(--muted); }
+  .synth-badge {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #f9731633;
+    color: #f97316;
+    border: 1px solid #f9731655;
+    margin-left: 6px;
+  }
+
   /* Tooltip */
   #tooltip {
     position: fixed;
@@ -445,6 +520,43 @@
   </div>
 </header>
 
+<!-- ── Control bar ─────────────────────────────────────────────────────────── -->
+<div class="control-bar">
+  <!-- Sort -->
+  <div class="ctrl-group">
+    <span class="ctrl-label">Sort by</span>
+    <button class="ctrl-btn active" id="sort-score"   onclick="setSort('score')">Score ↑</button>
+    <button class="ctrl-btn"        id="sort-process" onclick="setSort('process')">Process</button>
+    <button class="ctrl-btn"        id="sort-age"     onclick="setSort('age')">Age ↓</button>
+  </div>
+
+  <!-- Mode -->
+  <div class="ctrl-group">
+    <span class="ctrl-label">Mode</span>
+    <button class="ctrl-btn mode-live active"  id="mode-live"  onclick="setSimMode('live')">🖥 Live OS</button>
+    <button class="ctrl-btn mode-synth"        id="mode-synth" onclick="setSimMode('synthetic')">⚡ Synthetic</button>
+  </div>
+
+  <!-- Phase selector (visible in both modes; in synthetic mode drives the trace) -->
+  <div class="ctrl-group">
+    <span class="ctrl-label">Phase</span>
+    <button class="ctrl-btn phase-0" id="ph-auto" onclick="setPhase(null)">Auto</button>
+    <button class="ctrl-btn phase-0" id="ph-0"    onclick="setPhase(0)">Init</button>
+    <button class="ctrl-btn phase-1" id="ph-1"    onclick="setPhase(1)">Steady</button>
+    <button class="ctrl-btn phase-2" id="ph-2"    onclick="setPhase(2)">Sequential</button>
+    <button class="ctrl-btn phase-3" id="ph-3"    onclick="setPhase(3)">Random</button>
+    <button class="ctrl-btn phase-4" id="ph-4"    onclick="setPhase(4)">Hotspot</button>
+  </div>
+
+  <!-- Info toggle -->
+  <div class="ctrl-group" style="margin-left:auto">
+    <button class="ctrl-btn" id="explainer-toggle" onclick="toggleExplainer()">? How eviction works</button>
+  </div>
+</div>
+
+<!-- ── Phase explainer drawer ────────────────────────────────────────────────── -->
+<div id="phase-explainer"></div>
+
 <!-- ── Main layout ─────────────────────────────────────────────────────────── -->
 <div class="main">
 
@@ -456,6 +568,7 @@
         <span style="color:var(--muted);font-size:10px;font-weight:400;text-transform:none">
           DQN scores each page, evicts lowest
         </span>
+        <span id="synth-label" class="synth-badge" style="display:none">⚡ Synthetic trace</span>
         <div class="cache-legend">
           <div class="legend-item"><div class="legend-dot" style="background:#1d4ed8"></div>Just added</div>
           <div class="legend-item"><div class="legend-dot" style="background:#b91c1c"></div>Evicting</div>
@@ -780,9 +893,19 @@ function renderUpdate(data) {
   // ── Remote machine panel
   renderRemote(data.remote);
 
+  // ── Sync control bar state from server
+  syncControls(data);
+
+  // ── Synthetic mode badge on cache section title
+  const synthLabel = document.getElementById('synth-label');
+  if (synthLabel) {
+    synthLabel.style.display = data.sim_mode === 'synthetic' ? 'inline' : 'none';
+  }
+
   // ── Tab title: show DQN miss rate so you can monitor without switching tabs
   const dqnMiss = lastOf(mrs.DQN);
-  document.title = `PARL [DQN ${dqnMiss} | LRU ${lastOf(mrs.LRU)}] — Step ${fmtNum(data.step)}`;
+  const modeTag = data.sim_mode === 'synthetic' ? '⚡' : '🖥';
+  document.title = `${modeTag} PARL [DQN ${dqnMiss} | LRU ${lastOf(mrs.LRU)}] — Step ${fmtNum(data.step)}`;
 }
 
 function scoreColor(score) {
@@ -874,6 +997,189 @@ grid.addEventListener('mousemove', e => {
   `;
 });
 grid.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Control bar — sort / mode / phase
+// ─────────────────────────────────────────────────────────────────────────────
+const PHASE_EXPLAINER = {
+  null: null,
+  0: {
+    title: "Phase 0 — Initialization (Cold Start)",
+    desc: "Brand-new pages being loaded for the first time. Cache is filling up. Every access is a miss by definition. No policy wins here — all miss at 100% until warm-up.",
+    policies: [
+      { name:"DQN",  miss:100, color:"#3fb950", note:"Scores all pages 0.1 (unknown = cold)" },
+      { name:"LRU",  miss:100, color:"#8b949e", note:"Evicts oldest — same as everyone else" },
+      { name:"LFU",  miss:100, color:"#ffa657", note:"No frequency data yet, behaves randomly" },
+      { name:"ARC",  miss:100, color:"#bc8cff", note:"Both T1/T2 empty, ghost lists empty" },
+    ],
+    eviction_desc: "DQN evicts pages with CPU%=0 (idle processes). With no history, this is the best guess.",
+  },
+  1: {
+    title: "Phase 1 — Steady State (Hot Working Set)",
+    desc: "The same 20% of pages get 80% of accesses. Classic temporal locality. LRU shines here — hot pages stay near the top of the recency list.",
+    policies: [
+      { name:"DQN",  miss:18,  color:"#3fb950", note:"CPU% signal identifies hot processes" },
+      { name:"LRU",  miss:22,  color:"#8b949e", note:"Excellent — hot pages naturally stay" },
+      { name:"LFU",  miss:20,  color:"#ffa657", note:"Good — frequency counts protect hot pages" },
+      { name:"ARC",  miss:19,  color:"#bc8cff", note:"T2 (ghost hits) promotions work well" },
+    ],
+    eviction_desc: "DQN evicts sleeping processes first (CPU≈0). firefox/python3 stay; systemd/kworker go.",
+  },
+  2: {
+    title: "Phase 2 — Sequential Scan (LRU Killer)",
+    desc: "Pages accessed once in strict order — a full table scan, large file copy, video encode. Each page evicts the one that will be accessed NEXT. LRU is catastrophically bad here.",
+    policies: [
+      { name:"DQN",  miss:52,  color:"#3fb950", note:"Detects scan, lower scores for one-time pages" },
+      { name:"LRU",  miss:100, color:"#8b949e", note:"THRASHES — evicts the next page needed" },
+      { name:"LFU",  miss:55,  color:"#ffa657", note:"Better than LRU, but can't predict scan" },
+      { name:"ARC",  miss:58,  color:"#bc8cff", note:"T1 (recency) fails; ghost B1 helps a bit" },
+    ],
+    eviction_desc: "DQN scores scan pages LOW (rss_delta growing but CPU low, no reuse). Keeps background daemons alive.",
+  },
+  3: {
+    title: "Phase 3 — Random Access",
+    desc: "Pages accessed in pure random order — no locality at all. Frequency is the only signal. LFU has an edge; LRU and others are equal-bad.",
+    policies: [
+      { name:"DQN",  miss:72,  color:"#3fb950", note:"Blends CPU + frequency when trained" },
+      { name:"LRU",  miss:86,  color:"#8b949e", note:"Random = all pages equally likely to be next" },
+      { name:"LFU",  miss:78,  color:"#ffa657", note:"Counts provide some signal even in random" },
+      { name:"ARC",  miss:82,  color:"#bc8cff", note:"Adaptive but random defeats both T1+T2" },
+    ],
+    eviction_desc: "DQN evicts pages whose process is currently sleeping (CPU%=0). Best achievable without oracle.",
+  },
+  4: {
+    title: "Phase 4 — Hotspot (Skewed Distribution)",
+    desc: "5 'superstar' pages get 90% of all accesses. Everything else is noise. A tiny cache perfectly fits the working set. ARC and DQN both detect this pattern.",
+    policies: [
+      { name:"DQN",  miss:12,  color:"#3fb950", note:"Hot process pages score 0.9+, stay forever" },
+      { name:"LRU",  miss:15,  color:"#8b949e", note:"Good — hot pages naturally float to top" },
+      { name:"LFU",  miss:10,  color:"#ffa657", note:"Best for hotspot — high-frequency pages win" },
+      { name:"ARC",  miss:11,  color:"#bc8cff", note:"Ghost list catches re-heated pages perfectly" },
+    ],
+    eviction_desc: "DQN scores hot pages (redis/postgres CPU spikes) near 1.0. Cold tail pages evicted aggressively.",
+  },
+};
+
+let currentSimMode = 'live';
+let currentForcedPhase = null;
+let currentSortBy = 'score';
+let explainerOpen = false;
+
+function setSort(by) {
+  currentSortBy = by;
+  ['score','process','age'].forEach(s => {
+    document.getElementById('sort-'+s).classList.toggle('active', s === by);
+  });
+  fetch('/set_mode', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ sort_by: by }) });
+}
+
+function setSimMode(mode) {
+  currentSimMode = mode;
+  document.getElementById('mode-live').classList.toggle('active', mode === 'live');
+  document.getElementById('mode-synth').classList.toggle('active', mode === 'synthetic');
+  fetch('/set_mode', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ sim_mode: mode, forced_phase: currentForcedPhase }) });
+  // Re-render explainer if open
+  if (explainerOpen) renderExplainer(currentForcedPhase);
+}
+
+function setPhase(phaseId) {
+  currentForcedPhase = phaseId;
+  // Update button states
+  ['auto','0','1','2','3','4'].forEach(id => {
+    const el = document.getElementById('ph-' + id);
+    if (!el) return;
+    const matches = (id === 'auto') ? phaseId === null : parseInt(id) === phaseId;
+    el.classList.toggle('active', matches);
+  });
+  fetch('/set_mode', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ forced_phase: phaseId, sim_mode: currentSimMode }) });
+  if (explainerOpen) renderExplainer(phaseId);
+}
+
+function toggleExplainer() {
+  explainerOpen = !explainerOpen;
+  const el = document.getElementById('phase-explainer');
+  const btn = document.getElementById('explainer-toggle');
+  el.classList.toggle('open', explainerOpen);
+  btn.classList.toggle('active', explainerOpen);
+  if (explainerOpen) renderExplainer(currentForcedPhase);
+}
+
+function renderExplainer(phaseId) {
+  const el = document.getElementById('phase-explainer');
+  const info = PHASE_EXPLAINER[phaseId];
+  if (!info) {
+    el.innerHTML = `
+      <div class="explainer-col">
+        <div class="explainer-title" style="color:var(--blue)">Auto Phase Detection</div>
+        <div style="color:var(--muted);font-size:11px;line-height:1.6">
+          The phase classifier reads your live process access patterns and automatically
+          selects one of 5 phases (Init→Steady→Sequential→Random→Hotspot).<br><br>
+          Select a specific phase to <b>lock it</b> and optionally switch to
+          <b>Synthetic mode</b> to replay a textbook trace for that phase —
+          great for understanding how DQN vs LRU vs LFU behave in controlled conditions.
+        </div>
+      </div>
+      <div class="explainer-col">
+        <div class="explainer-title">How eviction works</div>
+        <div style="font-size:11px;color:var(--muted);line-height:1.7">
+          <b style="color:var(--text)">DQN-direct</b> scores every cached page with a neural network.<br>
+          The page with the <b style="color:var(--red)">lowest score</b> gets evicted.<br><br>
+          Score = <span style="color:var(--orange)">CPU%</span> of owning process (primary) +
+          <span style="color:var(--blue)">RSS delta</span> (growing=hot) +
+          <span style="color:var(--purple)">NN adjustment</span> (blends in after training).<br><br>
+          Tile colours: 🟢 Keep &nbsp; 🟡 Neutral &nbsp; 🔴 Evict next
+        </div>
+      </div>`;
+    return;
+  }
+  const synthBadge = currentSimMode === 'synthetic'
+    ? `<span class="synth-badge">⚡ Synthetic trace active</span>` : '';
+  el.innerHTML = `
+    <div class="explainer-col" style="min-width:260px">
+      <div class="explainer-title" style="color:var(--blue)">${info.title} ${synthBadge}</div>
+      <div style="color:var(--muted);font-size:11px;line-height:1.6;margin-bottom:8px">${info.desc}</div>
+      <div style="font-size:11px;color:var(--muted)"><b style="color:var(--text)">DQN decision:</b> ${info.eviction_desc}</div>
+    </div>
+    <div class="explainer-col" style="min-width:220px">
+      <div class="explainer-title">Expected miss rates in this phase</div>
+      ${info.policies.map(p => `
+        <div class="explainer-row">
+          <span class="explainer-policy" style="color:${p.color}">${p.name}</span>
+          <div class="explainer-bar-bg">
+            <div class="explainer-bar" style="width:${p.miss}%;background:${p.color}"></div>
+          </div>
+          <span style="font-family:monospace;font-size:10px;min-width:36px;text-align:right;color:${p.color}">${p.miss}%</span>
+        </div>
+        <div class="explainer-verdict">${p.note}</div>
+      `).join('')}
+    </div>`;
+}
+
+// Sync control bar state from SSE data
+function syncControls(data) {
+  if (data.sim_mode && data.sim_mode !== currentSimMode) {
+    currentSimMode = data.sim_mode;
+    document.getElementById('mode-live').classList.toggle('active', currentSimMode === 'live');
+    document.getElementById('mode-synth').classList.toggle('active', currentSimMode === 'synthetic');
+  }
+  if (data.sort_by && data.sort_by !== currentSortBy) {
+    currentSortBy = data.sort_by;
+    ['score','process','age'].forEach(s =>
+      document.getElementById('sort-'+s).classList.toggle('active', s === currentSortBy));
+  }
+  if ('forced_phase' in data && data.forced_phase !== currentForcedPhase) {
+    currentForcedPhase = data.forced_phase;
+    ['auto','0','1','2','3','4'].forEach(id => {
+      const el = document.getElementById('ph-' + id);
+      if (!el) return;
+      const matches = (id === 'auto') ? currentForcedPhase === null : parseInt(id) === currentForcedPhase;
+      el.classList.toggle('active', matches);
+    });
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SSE stream connection
