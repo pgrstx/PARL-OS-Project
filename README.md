@@ -145,4 +145,4 @@ PARL's key advantage: **lower miss rate at phase transition boundaries** (Figure
 4. Song et al. (2022, IEEE Trans. Computers) — RL for cache replacement
 5. Lykouris & Vassilvitskii (2018, ICML) — ML-augmented caching theory
 
-(See preliminary_report.pdf for full 15-reference bibliography)
+(See preliminary_report.pdf for full 15-reference bibliography).
